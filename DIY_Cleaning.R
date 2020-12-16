@@ -102,7 +102,7 @@ all_alarms <- data_tbl %>%
 # --------------------------------------------- ASSINGINING ALARMS TO DEVICES -----------------------------------------------------------
 
 # load device assignments from file Appendix_4_DeviceAssignments.R
-source("Appendix_4_DeviceAssignments.R")
+source("DeviceAssignments.R")
 
 data_tbl <- data_tbl %>%
   mutate(Alarmgruppe = case_when(
