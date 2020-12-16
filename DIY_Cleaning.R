@@ -6,7 +6,7 @@ library(lubridate)
 # --------------------------------------------- IMPORT AND PREPARE DATA -----------------------------------------------------------
 
 # Importing the sample raw data
-load("Appendix_1_RawData.Rdata")
+load("RawData.Rdata")
 
 # to import your own raw log data use the code below
 #
