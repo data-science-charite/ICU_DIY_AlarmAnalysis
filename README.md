@@ -1,5 +1,6 @@
 # DIY Analysis of ICU Alarm Data
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4328013.svg)](https://doi.org/10.5281/zenodo.4328013)
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4328371.svg)](https://doi.org/10.5281/zenodo.4328371)
 
 **This repository accompanies the following Publication:**
 
