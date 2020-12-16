@@ -1,0 +1,822 @@
+---
+title: "Do-it-Yourself Alarm Report"
+author: "Poncette, Wunderlich, Spies, Heeren, Vorderwülbecke, Salgado, Kastrup, Feufel, Balzer"
+date: ""
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+Sys.setlocale("LC_ALL", 'en_US.UTF-8')
+
+library(ggplot2)
+library(lubridate)
+library(scales)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(lubridate)
+library(gridExtra)
+library(car)
+library(ggrepel)
+library(shiny)
+
+```
+
+```{r load-data, echo=TRUE}
+load("Appendix_2_CleanedData.Rdata")
+```
+```{r Prepare data table, message=FALSE}
+# prepare data for plotting
+data_tbl <- data_tbl %>% 
+  group_by(Bettname) %>% 
+  # Differentiating between High/Low heart rate, invasive blood pressure and rate of breathing (ECG)
+  mutate(Alarm = case_when(
+    Alarm == "HF" & Richtung == "überschritten" ~ "HF.high",
+    Alarm == "HF" & Richtung == "unterschritten" ~ "HF.low",
+    Alarm %in% c("ABPs", "ABPm", "ABPd") & Richtung == "überschritten" ~ paste0(Alarm, ".high"),
+    Alarm %in% c("ABPs", "ABPm", "ABPd") & Richtung == "unterschritten" ~ paste0(Alarm, ".low"),
+    Alarm == "AF" & Richtung == "überschritten" ~ "AF.high",
+    Alarm == "AF" & Richtung == "unterschritten" ~ "AF.low",
+    Alarm == "MINVOL" & Richtung == "überschritten" ~ "MINVOL.high",
+    Alarm == "MINVOL" & Richtung == "unterschritten" ~ "MINVOL.low",
+    TRUE ~ as.character(Alarm)
+  )) %>%
+  mutate(Alarm = as.factor(Alarm)) %>% 
+  # add a dummytimes column with time floored to the minute
+  mutate(dummytimes = floor_date(TrueTime, unit = "minutes")) 
+  
+# set all dummytimes to first date in table
+date(data_tbl$dummytimes) <- as.Date(data_tbl$dummytimes[1])
+
+```
+
+## Alarms per Bed per Day
+
+This ICU has in total `r length(unique(data_tbl$Bettname))`beds. The data span `r length(unique(as.Date(data_tbl$TrueTime)))` calendar days.
+
+**Table 1: Summary of Alarms per Bed per Day**
+```{r Alarms per Bed per Day, message=FALSE}
+
+N_of_Beds <- length(unique(data_tbl$Bettname))
+
+ApBpD <- data_tbl %>%
+  filter(Situation == "generiert") %>% 
+  mutate(Date.only = as.Date(TrueTime)) %>%
+  group_by(Date.only) %>% 
+  summarise(n.alarms = n(), n.alarms.bed = n()/ N_of_Beds)
+
+
+# Stats of alarms per bed per day
+summary(ApBpD$n.alarms.bed)
+
+
+```
+
+*Table 1* shows that there are on average `r round(summary(ApBpD$n.alarms.bed)[4], 2)` alarms per bed per day on this ICU (SD `r round(sd(ApBpD$n.alarms.bed), 2)`).
+
+
+## Frequency of individual Alarms
+
+```{r AlarmFreq, echo=FALSE, message=FALSE, warning=FALSE}
+
+# arbitrary technical move (atm): count alarms without splitting color, to allow the sorting of factor levels to make ggplot plot alarm parameters from low to high frequency
+AlarmFreq <- data_tbl %>%
+  filter(!is.na(Alarm)) %>%
+  filter(Situation == "generiert") %>%
+  group_by(Alarm) %>%
+  summarise(counts = n()) %>%
+  arrange(desc(counts))
+
+# Now the actual data for the plot (split by color)
+AlarmFreqColor <- data_tbl %>%
+  filter(!is.na(Alarm)) %>%
+  filter(Situation == "generiert") %>%
+  group_by(Alarm, Alarmfarbe) %>%
+  summarise(counts = n()) %>%
+  arrange(desc(counts))
+
+# atm: sort factor level according to frequency of the alarm, to make ggplot plot alarm parameters from low to high frequency
+AlarmFreqColor$Alarm <- factor(AlarmFreqColor$Alarm, levels = AlarmFreq$Alarm[rev(order(AlarmFreq$counts))])  
+
+# atm: otherwise ggplot complains "object 'Alarmfarbe' not found"
+AlarmFreq$Alarmfarbe <- "blau"
+
+
+# plotting all alarms with more than 500 occurences
+AlarmFreqColor %>% 
+  filter(counts >= 500) %>% 
+  
+  ggplot(aes(x = Alarm, y = counts, fill = Alarmfarbe)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, .01)), labels = comma, breaks = seq(0, 35000, by = 2000)) +
+  scale_fill_manual(values=c("rot" = "#c80815","gelb" =  "#f4c430", "blau" = "#0073cf"), name = "", labels = c("Blue Alarms", "Yellow Alarms", "Red Alarms")) +
+  ylab("Number of Alarms") +
+  xlab("") +
+  theme_classic() +
+  theme(legend.position= "none", legend.direction = "vertical", text=element_text(size=12,  family="Times New Roman"), plot.margin = unit(c(1,1,1,1), "mm"),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x=NULL) 
+
+# How many alarms caused by top ten alarms
+FreqTopTen <- AlarmFreq %>%
+  head(10) %>%
+  pull(counts) %>% 
+  sum()
+
+```
+
+*Figure 1*. Frequency of individual alarm parameters with more than 500 occurences in the data. The colors correspond to the alarm criticalities (red, yellow, and blue). ABPs=systolic arterial blood pressure; HR=heart rate; FREQUENCY HIGH=ventilator alarm, respiratory rate too high; OPERATOR=generic ventilator alarm.
+
+
+On this ICU **`r round(FreqTopTen/sum(AlarmFreq$counts)*100)`%** of all alarms are caused by the ten most frequent alarm parameters.
+
+## Alarm frequencies by medical device
+```{r Alarms per Device, message=FALSE, warning=FALSE}
+
+# atm: count alarms without splitting color, to allow the sorting of factor levels to make ggplot plot alarm parameters from low to high frequency
+
+AlarmGroup <- data_tbl %>%
+  filter(!is.na(Alarmgruppe)) %>%
+  filter(Situation == "generiert") %>%
+  group_by(Alarmgruppe) %>%
+  summarise(counts = n()) %>%
+  arrange(desc(counts))
+
+AlarmGroupColor <- data_tbl %>%
+  filter(!is.na(Alarmgruppe)) %>%
+  filter(Situation == "generiert") %>%
+  group_by(Alarmgruppe, Alarmfarbe) %>%
+  summarise(counts = n()) %>%
+  arrange(desc(counts))
+
+
+# atm: sort factor level according to frequency of the alarm, to make ggplot plot devices from low to high frequency
+AlarmGroupColor$Alarmgruppe <- factor(AlarmGroupColor$Alarmgruppe, levels = AlarmGroup$Alarmgruppe[rev(order(AlarmGroup$counts))])
+
+# atm: otherwise ggplot complains "object 'Alarmfarbe' not found"
+AlarmGroup$Alarmfarbe <- "blau"
+
+
+# plotting all devices expept for thermodilution und technical failure
+AlarmGroupColor %>%
+  #filter(Alarmgruppe != "Thermodilution") %>%
+  #filter(Alarmgruppe != "Technical failure") %>%
+  
+  ggplot(aes(x = Alarmgruppe, y = counts, fill = Alarmfarbe)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(expand = expand_scale(mult = c(0, .05)), labels = comma, breaks = seq(0, 130000, by = 20000)) +
+  scale_fill_manual(values=c("rot" = "#c80815","gelb" =  "#f4c430", "blau" = "#0073cf"), name = "", labels = c("Blue Alarms", "Yellow Alarms", "Red Alarms")) +
+  ylab("Number of Alarms") +
+  xlab("Sensor Group") +
+  theme_classic() +
+  theme(legend.position= "none", text=element_text(size=12,  family="Times New Roman"), aspect.ratio = 1/2, plot.margin = unit(c(1,1,1,1), "mm"),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x=NULL)
+
+```
+
+*Figure 2*. Alarms from medical devices subdivided into the criticality levels (red, yellow). IBP=invasive blood pressure; ECG=electrocardiogram; SpO2=Oxygen saturation; ICP=intracranial pressure; NIBP=non-invasive blood pressure.
+
+## Alarm frequencies per device over Time
+
+**Table 2: Mean and SD of alarms per minute of the ventilator, ECG and IBP.**
+```{r per device over time, message=FALSE, warning=FALSE}
+
+# how many twentyfour hour periods are in the data?
+Twentyfour_h_periods <- data_tbl %>% 
+    mutate(Twentyfour = cut(strptime(TrueTime, format = "%Y-%m-%d %H:%M:%S"),breaks = "1440 mins", labels = FALSE)) %>% 
+    pull(Twentyfour) %>% 
+    unique() %>% 
+    length()
+
+  
+TimeSensor <- data_tbl %>%
+  filter(!is.na(Alarmgruppe)) %>%
+  filter(Situation == "generiert") %>%
+  group_by(Alarmgruppe, dummytimes, Schicht) %>%
+  summarise(counts = n()/ Twentyfour_h_periods) %>% # divide by the 24-hour-periods of the data
+  arrange(dummytimes)
+
+# atm: sort factor level according to frequency of the alarm, to make ggplot plot devices from low to high frequency
+TimeSensor$Alarmgruppe <- factor(TimeSensor$Alarmgruppe, levels = AlarmGroup$Alarmgruppe[rev(order(AlarmGroup$counts))])
+
+
+# Grand Mean and SD per device per minute
+TimeSensor.summary <- aggregate(counts ~ Alarmgruppe, data = TimeSensor[which(TimeSensor$Alarmgruppe %in% c("Ventilator", "ECG", "IBP" )),], FUN = function(x)
+  c(mean.AveragePerMin = mean(x), SD.AveragePerMin = sd(x) ) )
+
+TimeSensor.summary[,2] <- round(TimeSensor.summary[,2], 2)
+
+TimeSensor.summary
+
+```
+
+```{r plotting alarms per device over 24h, message=FALSE, warning=FALSE}
+# PLOTTING
+# atm: Set the date to day after the dummydate where the time is between 00:00 und 7:07AM and to the original dummydate where the time is between 7:08AM und 00:00.
+# This makes ggplot start the plot at 7 AM with the morning shift, instead of at 00:00.
+
+# extracting the dummy date to use it in the code hereafter
+DummyDate <- as.Date(data_tbl$dummytimes[1])
+DummyDate.plus1 <- DummyDate + 1
+DummyDate.day <- as.numeric(format(DummyDate, format = "%d"))
+
+# Define the shift intervals
+shiftplot1 <- as.POSIXct(sprintf("%s 00:00:00", DummyDate))
+shiftplot2 <- as.POSIXct(sprintf("%s 07:08:00", DummyDate))
+
+shiftplot.int <- interval(shiftplot1, shiftplot2)
+
+TimeSensor$dummytimes.shift <- as.POSIXlt(TimeSensor$dummytimes, format = "%Ym%d %H:%M:%S")
+TimeSensor$dummytimes.shift$mday <- ifelse(TimeSensor$dummytimes %within% shiftplot.int, DummyDate.day +1 , DummyDate.day)
+TimeSensor$dummytimes.shift <- as.POSIXct(TimeSensor$dummytimes.shift)
+
+
+TimeSensor %>%
+  filter(!is.na(Alarmgruppe)) %>%
+  filter( Alarmgruppe == "Ventilator" |
+            Alarmgruppe == "ECG" |
+            Alarmgruppe == "IBP") %>%
+  
+  ggplot(aes(x = dummytimes.shift, y = counts)) + 
+  
+  scale_x_datetime(date_labels = "%I%p",
+                   breaks = seq(as.POSIXct(sprintf('%s 07:00:00', DummyDate)),
+                                as.POSIXct(sprintf('%s 07:00:00', DummyDate.plus1)), "2 hours"),
+                   expand = expansion(mult = c(0.01, 0.03))) +
+  
+  geom_rect(data=TimeSensor[1,], aes(xmin = as.POSIXct(sprintf('%s 07:09:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 14:06:00', DummyDate)),
+                                     ymin = -Inf, ymax = Inf, fill = 'Morning'), alpha = .47, fill = "#D3D3D3") +
+  
+  geom_rect(data=TimeSensor[1,], aes(xmin = as.POSIXct(sprintf('%s 14:42:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 21:51:00', DummyDate)),
+                                     ymin = -Inf, ymax = Inf,fill = 'Afternoon'), alpha = .47, fill = "#D3D3D3") +
+  
+  geom_rect(data=TimeSensor[1,], aes(xmin = as.POSIXct(sprintf('%s 22:24:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 06:36:00', DummyDate.plus1)),
+                                     ymin = -Inf, ymax = Inf, fill = 'Night'), alpha = .47, fill = "#D3D3D3") +
+  
+  stat_smooth(aes(color = Alarmgruppe), method = "auto", se = FALSE, span = 0.1, size = 1) + 
+  
+  scale_y_continuous(expand = expansion(mult = c(0, .1)),
+                     breaks = seq(0, 3, 0.5) ) +
+  
+  geom_point(aes(color = Alarmgruppe), alpha = 0.5, size = 0.2) +
+  
+  annotate("text", x = as.POSIXct(sprintf('%s 10:30:00', DummyDate)) , y = 2, label = "Morning Shift", size = 4.1, family = "Times New Roman") +
+  annotate("text", x = as.POSIXct(sprintf('%s 18:30:00', DummyDate)) , y = 2, label = "Afternoon Shift", size = 4.1, family = "Times New Roman") +
+  annotate("text", x = as.POSIXct(sprintf('%s 02:30:00', DummyDate.plus1)) , y = 2, label = "Night Shift", size = 4.1, family = "Times New Roman") +
+  
+  labs(y = "Average Number of Alarms per Minute",
+       x = "Time of Day",
+       color = "",
+       title = "",
+       caption = "") +
+  
+  theme_classic() +
+  theme(text = element_text(family = "Times New Roman", size = 12), 
+        legend.position= "bottom",
+        legend.margin=margin(-5, 20, 0, 0),
+        
+        plot.margin = unit(c(1,1,1,1), "mm"))
+```
+
+*Figure 3*. Average distribution of alarms across 24 hours. The white spaces between the highlighted shifts are hand-over periods. Each dot shows the average alarm frequency of one minute for the specified sensor. The line for each sensor is calculated by ggplot2’s smoothing function and represents a generalized additive model of the distribution (with the formula y ~ s(x, bs = "cs"). It serves to aid in detecting trends in the data. IBP=invasive blood pressure; ECG=electrocardiogram.
+
+## Alarm Flood Conditions
+
+An “alarm flood” is defined as a condition where 10 or more alarms occur in 10 minutes, which is more than a human operator can be expected to respond to effectively.
+
+**Table 3.1: Summary of Alarms per Alarm Flood**
+```{r alarm flood stats, message=FALSE, warning=FALSE}
+
+# How this calculation works: The dataframe (DF) is grouped per Bed and split into 10 Minute bins, starting from the first timestamp.
+# Each bin for each bed receives a counting index.Next, the alarms in each 10 minute bin are counted.
+# Those 10 minute bins with more than 10 alarm occurrences are counted as an alarm flood.
+
+data_tbl <- data_tbl %>% 
+  group_by(Bettname) %>% 
+  mutate(TenMinuteIndex = cut(strptime(TrueTime, format = "%Y-%m-%d %H:%M:%S"),breaks = "10 mins", labels = FALSE)) %>% 
+  arrange(Zeit)
+  
+# counting all generated alarms in each 10 minute interval per bed
+Alarmfloods <- data_tbl %>%
+  filter(Situation == "generiert") %>%
+  group_by(Bettname, TenMinuteIndex) %>%
+  summarise(n.generiert = n()) %>%
+  filter(n.generiert >= 10)
+
+# Grouping the alarm floods
+Alarmfloods <- as.data.frame(Alarmfloods) # the for loop won't run on a tibble
+Alarmfloods$Group <- NA
+
+for (Group in c(100, 80, 60, 40, 20)) {
+  Alarmfloods[which(Alarmfloods$n.generiert <= Group),]$Group <- sprintf("<= %s", Group)
+}
+
+Alarmfloods[which(Alarmfloods$n.generiert > 100),]$Group <- "> 100"
+Alarmfloods$Group <- as.factor(Alarmfloods$Group)
+
+summary(Alarmfloods$n.generiert)
+
+```
+
+*Table 3.1* shows that there are on average `r round(summary(Alarmfloods$n.generiert)[4], 2)` alarms in every alarm flood (SD `r round(sd(Alarmfloods$n.generiert), 2)`, Median `r round(median(Alarmfloods$n.generiert), 2)`). 
+
+
+
+**Table 3.2: Distribution of Alarms per Alarm Flood**
+```{r alarms per alarm flood grouped, message=FALSE, warning=FALSE}
+# Creates groups of alarms per alarm flood and checks the distribution
+FloodGroups <- Alarmfloods %>%
+  group_by(Group) %>%
+  summarise(n.per.Group = n())
+
+FloodGroups$Group <- factor(FloodGroups$Group, levels = c("<= 20", "<= 40", "<= 60", "<= 80", "<= 100", "> 100"))
+
+FloodGroups <- FloodGroups %>% 
+  mutate(perc.per.Group = round((n.per.Group / sum(n.per.Group) * 100), 2)) %>% 
+  arrange(desc(perc.per.Group))
+
+FloodGroups
+
+```
+According to *Table 3.2*, `r FloodGroups[1,3]`% of all alarm floods have `r FloodGroups[1,1]` alarms.
+
+
+
+**Table 4: Alarm Floods per Day**
+```{r alarm floods over 24 hours and more stats, message=FALSE, warning=FALSE}
+# To Plot the alarm floods according to the time they occurred, the start time of those 10 Minute intervals with more than 10 alarms needs to be determined
+Time_TenMinIndex <- data_tbl %>% 
+  select(Bettname, TrueTime, TenMinuteIndex, dummytimes) %>% # select dummytimes to allow plotting independent of date
+  group_by(Bettname, TenMinuteIndex) %>%
+  arrange(TrueTime) %>% 
+  slice(1) %>% # get the first entry of every ten minute interval (the start time of the interval)
+  mutate(UniqueIndex = paste(TenMinuteIndex, Bettname, sep = "_")) # create a unique identifier for each interval, because so far, each bed has an interval "1", for example
+
+Alarmfloods <- Alarmfloods %>%
+  mutate(UniqueIndex = paste(TenMinuteIndex, Bettname, sep = "_")) %>% # create a unique identifier for each interval as well, to allow joining
+  left_join(Time_TenMinIndex,by = "UniqueIndex") %>% # join by the unique interval identifier to find the starting time of the alarm floods
+  select(Bettname = Bettname.x, UniqueIndex, TrueTime, dummytimes, n.generiert, Group) # select relevant variables
+
+# Alarmfloods per day
+Alarmfloods.pDay <- Alarmfloods %>% 
+  mutate(Date.only = as.Date(TrueTime)) %>%
+  group_by(Date.only) %>% 
+  summarise(n.floods = n(), n.floods.bed = n()/ N_of_Beds)
+
+# Total, Mean and SD of Alarmfloods per day
+summary(Alarmfloods.pDay$n.floods) # summary
+```
+*Table 4* shows that there are on average `r round(summary(Alarmfloods.pDay$n.floods)[4], 2)` alarm floods per day (SD `r round(sd(Alarmfloods.pDay$n.floods), 2)`, Median `r round(median(Alarmfloods.pDay$n.floods), 2)`). In total `r comma(sum(Alarmfloods.pDay$n.floods))` alarm floods occurred.
+
+
+```{r visualizing alarm floods over 24 hours, message=FALSE, warning=FALSE}
+
+# Create chunks of 10 minutes for the plot
+Alarmfloods$bins <- cut(strptime(Alarmfloods$dummytimes, format = "%Y-%m-%d %H:%M:%S"),"10 mins")
+Alarmfloods$bins <- as.POSIXct(Alarmfloods$bins)
+
+# count how many alarm floods occur in each ten minute bin
+Alarmfloods.time <- Alarmfloods %>%
+  group_by(bins) %>%
+  summarise(counts = n()) %>%
+  arrange(bins)
+
+# atm: Set the date to day after the dummydate where the time is between 00:00 und 7:07AM and to the original dummydate where the time is between 7:08AM und 00:00.
+# This makes ggplot start the plot at 7 AM with the morning shift, instead of at 00:00.
+# The variables shiftplot.int and Dummydate.day were defined above.
+Alarmfloods.time$dummytimes.shift <- as.POSIXlt(Alarmfloods.time$bins, format = "%Ym%d %H:%M:%S")
+Alarmfloods.time$dummytimes.shift$mday <- ifelse(Alarmfloods.time$bins %within% shiftplot.int, DummyDate.day +1 , DummyDate.day)
+Alarmfloods.time$dummytimes.shift <- as.POSIXct(Alarmfloods.time$dummytimes.shift)
+
+
+Alarmfloods.time %>%
+  
+  ggplot(aes(x = dummytimes.shift, y = counts)) + 
+  
+  scale_x_datetime(date_labels = "%I%p",
+                   breaks = seq(as.POSIXct(sprintf('%s 07:00:00', DummyDate)),
+                                as.POSIXct(sprintf('%s 07:00:00', DummyDate.plus1)), "2 hours"),
+                   expand = expansion(mult = c(0.01, 0.03))) +
+  
+  geom_rect(data=Alarmfloods.time[1,], aes(xmin = as.POSIXct(sprintf('%s 07:09:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 14:06:00', DummyDate)),
+                                     ymin = -Inf, ymax = Inf, fill = 'Morning'), alpha = .47, fill = "#D3D3D3") +
+  
+  geom_rect(data=Alarmfloods.time[1,], aes(xmin = as.POSIXct(sprintf('%s 14:42:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 21:51:00', DummyDate)),
+                                     ymin = -Inf, ymax = Inf,fill = 'Afternoon'), alpha = .47, fill = "#D3D3D3") +
+  
+  geom_rect(data=Alarmfloods.time[1,], aes(xmin = as.POSIXct(sprintf('%s 22:24:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 06:36:00', DummyDate.plus1)),
+                                     ymin = -Inf, ymax = Inf, fill = 'Night'), alpha = .47, fill = "#D3D3D3") +
+  
+  stat_smooth(method = "loess", se = FALSE, size = 1) + 
+  
+  scale_y_continuous(expand = expansion(mult = c(0, .05)),
+                     breaks = seq(0, 80, 10) ) +
+  
+  geom_point(alpha = 0.6, size = 0.4) +
+  
+  annotate("text", x = as.POSIXct(sprintf('%s 10:30:00', DummyDate)) , y = 79, label = "Morning Shift", size = 4.1, family = "Times New Roman") +
+  annotate("text", x = as.POSIXct(sprintf('%s 18:30:00', DummyDate)) , y = 79, label = "Afternoon Shift", size = 4.1, family = "Times New Roman") +
+  annotate("text", x = as.POSIXct(sprintf('%s 02:30:00', DummyDate.plus1)) , y = 79, label = "Night Shift", size = 4.1, family = "Times New Roman") +
+  
+  labs(y = "Sum of Alarmfloods",
+       x = "Time of Day",
+       color = "",
+       title = "",
+       caption = "") +
+  
+  theme_classic() +
+  theme(text = element_text(family = "Times New Roman", size = 12), 
+        legend.position= "bottom",
+        legend.margin=margin(-5, 20, 0, 0),
+        
+        plot.margin = unit(c(1,1,1,1), "mm"))
+```
+
+*Figure 4*. Temporal distribution of alarm flood conditions over 24 hours. Each dot indicates the sum of all alarm flood conditions that were initiated at the respective time of day in ten minute intervals. For example, the first dot on the far left indicates that 43 alarm floods occurred between 7:10 and 7:20 AM across all days in the data. The blue line is a local regression, calculated by ggplot2’s smoothing function (formula: y ~ x). The white spaces between the highlighted shifts are hand-over periods.
+
+
+## Technical Alarms
+Technical alarms, whether they were responded to with an intervention or not, are considered  *a priori* as avoidable by Hüske-Kraus et al. (2018).
+
+**Table 5: The Frequency and Criticality of Technical Alarms**
+```{r overview of technical alarms, message=FALSE, warning=FALSE}
+# Sort technical alarms according to color
+tech.gelb <- as.character(unique(data_tbl[which(
+  grepl("!", data_tbl$Aktion) & data_tbl$Alarmfarbe == "gelb"
+  ),]$Alarm))
+
+tech.rot <- as.character(unique(data_tbl[which(
+  grepl("!", data_tbl$Aktion) & data_tbl$Alarmfarbe == "rot"
+  ),]$Alarm))
+
+tech.blau <- as.character(unique(data_tbl[which(
+  grepl("generiert",data_tbl$Aktion) & data_tbl$Alarmfarbe == "blau"
+  ),]$Alarm))
+
+
+tech.Alarms <- c(tech.blau, tech.gelb, tech.rot)
+
+# Overview of technical alarms per bed per day
+tech.Alarms.freq <- data_tbl %>%
+  filter(!is.na(Alarm)) %>%
+  filter(Situation == "generiert") %>%
+  filter(Alarm %in% tech.Alarms) %>%
+  mutate(Date.only = as.Date(TrueTime)) %>%
+  group_by(Date.only) %>% 
+  summarise(n.alarms = n(), n.alarms.bed = n()/ N_of_Beds)
+
+# Mean and SD of technical alarms per bed per day
+summary(tech.Alarms.freq$n.alarms.bed)
+sd(tech.Alarms.freq$n.alarms.bed)
+
+# frequencies of individual technical alarm parameters
+tech.Alarms.color <- data_tbl %>%
+  filter(!is.na(Alarm)) %>%
+  filter(Situation == "generiert") %>%
+  filter(Alarm %in% tech.Alarms) %>%
+  group_by(Alarm, Alarmfarbe) %>% 
+  summarise(n.alarms = n()) %>% 
+  arrange(desc(n.alarms))
+
+head(tech.Alarms.color, 10)
+```
+*Table 5* shows the ten most frequent technical alarms of the data. The parameter "`r tech.Alarms.color[1, 1]`" is the most frequent technical alarm with `r comma(as.numeric(tech.Alarms.color[1, 3]))` occurrences.
+
+## Response Time to Alarms
+
+**Table 6: Distribution of the Response Time to Alarms**
+```{r inspecting RT distribution, message=FALSE, warning=FALSE}
+# Inspecting the distribution of the response times
+# pulling the response time values from the data
+Rts <- data_tbl %>%
+  filter(Situation == "beendet") %>%
+  select(Zeitdifferenz) %>%
+  filter(!is.na(Zeitdifferenz)) %>% 
+  pull()
+
+# calculating mean, sd, mode and median to gain understanding of distribution
+summary(Rts)
+
+```
+*Table 6*: The average response time to alarms is `r round(summary(Rts)[4], 2)`seconds (SD `r round(sd(Rts), 2)`s, Median `r round(median(Rts), 2)`s).The distribution of the response times is heavily skewed, which is why the median will be used for plotting instead of the mean. Additionally, because some response times were calculated to be longer than 4 days, all response times longer than 10 minutes are considered as outliers.
+
+
+```{r plotting the median reaction time per device, message=FALSE, warning=FALSE}
+# general overview of RT center and spread per device and alarm color of RT < 10 Minutes (600 seconds)
+RT.device <- aggregate(Zeitdifferenz ~ Alarmgruppe + Alarmfarbe,
+                       data = data_tbl[which( data_tbl$Situation == "beendet" & data_tbl$Zeitdifferenz <= 600 ),], FUN = function(x) 
+                         c(mean = mean(x), SD = sd(x), min = min(x), max = max(x), median = median(x) ) ) 
+RT.device[,3] <- round(RT.device[,3], 2)
+
+# overview of RT center and spread for the alarm colors of RT < 10 Minutes (600 seconds)
+RT.color <- aggregate(Zeitdifferenz ~ Alarmfarbe,
+                       data = data_tbl[which( data_tbl$Situation == "beendet" & data_tbl$Zeitdifferenz <= 600 ),], FUN = function(x) 
+                         c(mean = mean(x), SD = sd(x), min = min(x), max = max(x), median = median(x) ) ) 
+
+# overview of RT center and spread for the medical devices irregardless of color (of RT < 10 Minutes (600 seconds))
+RT.device.noColor <- aggregate(Zeitdifferenz ~ Alarmgruppe,
+                               data = data_tbl[which( data_tbl$Situation == "beendet" & data_tbl$Zeitdifferenz <= 600 ),], FUN = function(x) 
+                                 c(mean = mean(x), SD = sd(x), min = min(x), max = max(x), median = median(x) ) ) 
+
+
+
+# preparing the data to plot median RT
+medianRT <- RT.device[,3][,5]
+medianRT.device <- cbind(RT.device[,1:2], medianRT)
+
+# atm: adding two rows with NA value for red NIBP and Temp alarms (which don't exist), to force ggolot to make bars of equal width.
+medianRT.device <- rbind(medianRT.device, data.frame(Alarmgruppe = "NIBP", Alarmfarbe = "rot", medianRT = NA))
+medianRT.device <- rbind(medianRT.device, data.frame(Alarmgruppe = "Temperature", Alarmfarbe = "rot", medianRT = NA))
+
+# atm: sorting factor levels according to reaction time, to plot from low to high
+medianRT.device$Alarmgruppe <- factor(medianRT.device$Alarmgruppe, levels = unique(medianRT.device$Alarmgruppe[order(-medianRT.device$medianRT)]))
+
+medianRT.device %>%
+  filter(Alarmgruppe != "Thermodilution") %>%
+  filter(Alarmgruppe != "NOT_ASSIGNED") %>%
+  
+  ggplot(aes(x = Alarmgruppe, y = medianRT, fill = Alarmfarbe)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = sprintf("%ss",medianRT), family="Times New Roman", group = Alarmfarbe), vjust = -0.5, position = position_dodge(width = 1)) +
+  
+  annotate("text", x = 1.2 , y = 1.5, label = "n/a", size = 3, family = "Times New Roman") +
+  annotate("text", x = 4.2 , y = 1.5, label = "n/a", size = 3, family = "Times New Roman") +
+  
+  scale_y_continuous(expand = expand_scale(mult = c(0, .10)), breaks = seq(0, 70, by = 10)) +
+  scale_fill_manual(values=c("rot" = "#c80815","gelb" =  "#f4c430", "blau" = "#0073cf"), name = "", labels = c("Blue Alarms", "Yellow Alarms", "Red Alarms")) +
+  ylab("Median alarm duration in seconds") +
+  xlab("Sensor Group") +
+  theme_classic() +
+  theme(legend.position="bottom", text=element_text(size=12,  family="Times New Roman"), aspect.ratio = 1.85/3, plot.margin = unit(c(1,1,1,1), "mm")) +
+  labs(x=NULL)
+```
+
+*Figure 5*. The median response times to alarms from eight medical devices. The colors correspond to the alarm criticalities (red, yellow and blue). NIBP=noninvasive blood pressure; SpO2=Oxygen saturation; ECG=electrocardiogram; ICP=intracranial pressure; IBP=invasive blood pressure.
+
+
+```{r plotting median RT against frequency of alarms by device, message=FALSE, warning=FALSE}
+
+RTxFreq <- medianRT.device %>%
+  filter(!is.na(medianRT)) %>% 
+  left_join(AlarmGroupColor, by = c("Alarmgruppe", "Alarmfarbe")) # joining with the table of frequency by color and device
+
+RTxFreq %>%
+  filter(Alarmgruppe != "Thermodilution") %>%
+  filter(Alarmgruppe != "NOT_ASSIGNED") %>%
+  
+  ggplot(aes(x = medianRT, y = counts, fill = Alarmgruppe, colour = Alarmfarbe)) + 
+  geom_point(size = 2) +
+  #geom_text(aes(label = Alarmgruppe, family="Times New Roman"), vjust = -1, position = position_dodge(width = 5)) +
+  ggrepel::geom_text_repel(aes(label = Alarmgruppe)) + # alternative to geom_text: connects dots with labels if overlap occurs
+  scale_colour_manual(values=c("rot" = "#c80815","gelb" =  "#f4c430", "blau" = "#0073cf"), name = "", labels = c("Blue Alarms", "Yellow Alarms", "Red Alarms")) +
+  scale_y_continuous(expand = expand_scale(mult = c(0, .05)), labels = comma, breaks = seq(0, 85000, by = 5000)) +
+  scale_x_continuous(expand = expand_scale(mult = c(0, .015)), breaks = seq(0, 60, by = 5)) +
+  ylab("Total alarm frequency") +
+  xlab("Median alarm duration in seconds") +
+  theme_classic() +
+  theme(legend.position="none", text=element_text(size=12,  family="Times New Roman"), aspect.ratio = 1.85/3, plot.margin = unit(c(1,1,1,1), "mm"))
+
+
+```
+
+*Figure 6*. The median response times to alarms from eight medical devices plotted against the total number of alarms issued by the respective device. The colors correspond to the alarm criticalities (red, yellow and blue). NIBP=noninvasive blood pressure; SpO2=Oxygen saturation; ECG=electrocardiogram; ICP=intracranial pressure; IBP=invasive blood pressure. 
+
+
+```{r RT to medical devices over time, message=FALSE, warning=FALSE}
+
+RT.device.time <- data_tbl %>%
+  filter(Alarmgruppe %in% c("Ventilator", "IBP", "ECG")) %>%
+  filter(Situation == "beendet") %>%
+  filter(Zeitdifferenz <= 600) %>%
+  group_by(Alarmgruppe, dummytimes, Schicht) %>%
+  summarise(medianRT = median(Zeitdifferenz), meanRT = mean(Zeitdifferenz)) %>% 
+  arrange(dummytimes)
+
+# atm: Set the date to day after the dummydate where the time is between 00:00 und 7:07AM and to the original dummydate where the time is between 7:08AM und 00:00.
+# This makes ggplot start the plot at 7 AM with the morning shift, instead of at 00:00.
+# The variables shiftplot.int and Dummydate.day were defined above.
+RT.device.time$dummytimes.shift <- as.POSIXlt(RT.device.time$dummytimes, format = "%Ym%d %H:%M:%S")
+RT.device.time$dummytimes.shift$mday <- ifelse(RT.device.time$dummytimes %within% shiftplot.int, DummyDate.day +1 , DummyDate.day)
+RT.device.time$dummytimes.shift <- as.POSIXct(RT.device.time$dummytimes.shift)
+
+# set factor levels for continuous color coding across plots
+RT.device.time$Alarmgruppe <- factor(RT.device.time$Alarmgruppe, levels = c("Ventilator", "IBP", "ECG"))
+
+RT.device.time %>%
+  
+  ggplot(aes(x = dummytimes.shift, y = medianRT)) + 
+  
+  scale_x_datetime(date_labels = "%I%p",
+                   breaks = seq(as.POSIXct(sprintf('%s 07:00:00', DummyDate)),
+                                as.POSIXct(sprintf('%s 07:00:00', DummyDate.plus1)), "2 hours"),
+                   expand = expansion(mult = c(0.01, 0.03))) +
+  
+  geom_rect(data=RT.device.time[1,], aes(xmin = as.POSIXct(sprintf('%s 07:09:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 14:06:00', DummyDate)),
+                                     ymin = -Inf, ymax = Inf, fill = 'Morning'), alpha = .47, fill = "#D3D3D3") +
+  
+  geom_rect(data=RT.device.time[1,], aes(xmin = as.POSIXct(sprintf('%s 14:42:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 21:51:00', DummyDate)),
+                                     ymin = -Inf, ymax = Inf,fill = 'Afternoon'), alpha = .47, fill = "#D3D3D3") +
+  
+  geom_rect(data=RT.device.time[1,], aes(xmin = as.POSIXct(sprintf('%s 22:24:00', DummyDate)),
+                                     xmax = as.POSIXct(sprintf('%s 06:36:00', DummyDate.plus1)),
+                                     ymin = -Inf, ymax = Inf, fill = 'Night'), alpha = .47, fill = "#D3D3D3") +
+  
+  stat_smooth(aes(color = Alarmgruppe), method = "auto", se = FALSE, span = 0.1, size = 1, alpha = 0.3) + 
+  
+  scale_y_continuous(expand = expansion(mult = c(0, .08)),
+                     breaks = seq(0, 50, 5) ) +
+  
+  geom_point(aes(color = Alarmgruppe), alpha = 0.3, size = 0.1) +
+  
+  annotate("text", x = as.POSIXct(sprintf('%s 10:30:00', DummyDate)) , y = 37, label = "Morning Shift", size = 4.1, family = "Times New Roman") +
+  annotate("text", x = as.POSIXct(sprintf('%s 18:30:00', DummyDate)) , y = 37, label = "Afternoon Shift", size = 4.1, family = "Times New Roman") +
+  annotate("text", x = as.POSIXct(sprintf('%s 02:30:00', DummyDate.plus1)) , y = 37, label = "Night Shift", size = 4.1, family = "Times New Roman") +
+  
+  labs(y = "Median Response Time in Seconds",
+       x = "Time of Day",
+       color = "",
+       title = "",
+       caption = "") +
+  
+  theme_classic() +
+  theme(text = element_text(family = "Times New Roman", size = 12), 
+        legend.position= "bottom",
+        legend.margin=margin(-5, 20, 0, 0),
+        
+        plot.margin = unit(c(1,1,1,1), "mm"))
+
+```
+
+*Figure 7*. Median response times to alarms of the three medical devices that issue most alarms over 24 hours. Each dot represents the median response time for each minute of the day of the respective device. Response times longer than ten minutes are not included in the visualization. The line for each device is based on ggplot2’s smoothing function and represents a generalized additive model of the distribution (with the formula y ~ s(x, bs = "cs"). The white spaces between the highlighted shifts are hand-over periods. IBP=invasive blood pressure; ECG=electrocardiogram.
+
+
+## Usage of the Alarm Pause Function
+
+**Table 7: Alarm Pauses per Day**
+```{r pauses per day, message=FALSE, warning=FALSE}
+
+# Average frequency of pauses per shift and per day
+# per shift
+ShiftPause.PerDay <- data_tbl %>%
+  filter(Alarmpause == "Pause Ein") %>%
+  mutate(Date.only = as.Date(TrueTime)) %>% 
+  group_by(Schicht, Date.only) %>%
+  summarise(n.Pause = n())
+
+
+ShiftPause <- aggregate(n.Pause ~ Schicht, data = ShiftPause.PerDay, FUN = function(x)
+  c(total.n.Pause = sum(x), mean = mean(x), SD = sd(x), mean.per.Bed = c(mean(x)/N_of_Beds), min.perDay = min(x), max.perDay = max(x), median = median(x) ) ) 
+
+ShiftPause[,2] <- round(ShiftPause[,2], 2)
+
+# Stats about pauses per shift
+# ShiftPause
+
+# Average number of Pauses per Bed per Day
+Pause.perDay <- ShiftPause.PerDay %>% 
+  group_by(Date.only) %>% 
+  summarise(n.Pause.bed = sum(n.Pause) / N_of_Beds)
+
+# Mean and SD of Pauses per Bed per Day
+summary(Pause.perDay$n.Pause.bed)
+
+```
+*Table 7*: The pause function is engaged `r round(summary(Pause.perDay$n.Pause.bed)[4], 2)` times per day, on average (SD `r round(sd(Pause.perDay$n.Pause.bed), 2)`, Median `r round(median(Pause.perDay$n.Pause.bed), 2)`). 
+
+
+```{r data for duration of pauses, message=FALSE, warning=FALSE,results="hide"}
+
+# Duration of Pauses
+Pause.duration <- data_tbl %>%
+  filter(Alarmpause == "Pause Aus") %>%
+  group_by(PausenDauer) %>%
+  filter(!is.na(PausenDauer)) %>% 
+  summarise(n.Pause = n())
+
+# Grouping the pause durations
+Pause.duration <- as.data.frame(Pause.duration) # the for loop won't run on a tibble
+Pause.duration$Group <- NA
+
+for (Group in rev(seq(10, 190, 10))) {
+  Pause.duration[which(Pause.duration$PausenDauer <= Group),]$Group <- sprintf("<= %s", Group)
+}
+
+Pause.duration$Group <- as.factor(Pause.duration$Group)          
+Pausendauern.summary <- aggregate(n.Pause ~ Group, data = Pause.duration, FUN = function(x)
+  c(total.length.Pause = sum(x)) )
+
+Pausendauern.summary <- Pausendauern.summary %>%
+  mutate(perc = round(n.Pause/sum(n.Pause), 2)) %>%
+  arrange(desc(perc))
+
+# proper pause to pause ratio
+n.proper <- Pausendauern.summary %>%
+  filter(Group != "<= 190") %>% 
+  pull(n.Pause) %>% 
+  sum()
+  
+pptpr <- round(n.proper / sum(Pausendauern.summary$n.Pause), 2)
+
+```
+
+Of all pauses that were started, `r 100 * Pausendauern.summary[which(Pausendauern.summary$Group == "<= 190"),]$perc`%  were not actively terminated but lasted for their default maximum length of 3 minutes and therefore do not qualify as proper pauses according to Hüske-Kraus et al. (2018). The ICU’s proper pause to pause ratio is `r pptpr`:1.
+
+## Alarms per Room Type
+
+**Table 8.1: Alarms per Bed per Day per Room Type**
+```{r stats per room type, message=FALSE, warning=FALSE}
+# set number of beds per room type
+N_of_Single <- 9
+N_of_Double <- 12
+
+AlarmBeds <- data_tbl %>%
+  filter(Situation == "generiert") %>% 
+  mutate(Date.only = as.Date(TrueTime)) %>%
+  group_by(Date.only, Bettenanzahl) %>% 
+  summarise(n.alarms = n()) %>% 
+  mutate(n.alarms.bed = ifelse(Bettenanzahl == "Einbettzimmer", n.alarms/N_of_Single,
+                               n.alarms/N_of_Double))
+  
+# Stats of alarms per bed type per day
+alarms.p.roomtype <- aggregate(n.alarms.bed ~ Bettenanzahl, data = AlarmBeds, FUN = function(x)
+  c(mean = mean(x), sd = sd(x), median = median(x)))
+
+alarms.p.roomtype
+
+```
+
+**Table 8.2: Alarms per Bed per Room Type by Criticality**
+```{r room x color, message=FALSE, warning=FALSE}
+# bed type x color
+AlarmBeds.color <- data_tbl %>%
+  filter(Situation == "generiert") %>% 
+  group_by(Bettenanzahl, Alarmfarbe) %>% 
+  summarise(n.alarms = n()) %>% 
+  mutate(n.alarms.bed = ifelse(Bettenanzahl == "Einbettzimmer", n.alarms/N_of_Single,
+                               n.alarms/N_of_Double)) %>% 
+  select(-n.alarms)
+
+AlarmBeds.color$n.alarms.bed <- round(AlarmBeds.color$n.alarms.bed, 2)
+
+AlarmBeds.color
+```
+
+## Do a few patients cause most alarms?
+
+**Table 9.1: The Mean Number of Beds Above or Below the Daily Mean**
+```{r mean number of beds above/below the daily mean, message=FALSE, warning=FALSE}
+# creates a DF with the alarms generated at each bed for each day,
+# calculates the mean across beds for that day,
+# checks for each bed if its alarms are above that daily mean and
+# counts the number of beds above the mean during that day
+PatientAlarms <- data_tbl %>%
+  filter(Situation == "generiert") %>% 
+  mutate(Date.only = as.Date(TrueTime)) %>%
+  group_by(Date.only, Bettname) %>% 
+  summarise(n.alarms = n()) %>%
+  group_by(Date.only) %>% 
+  mutate(day.mean = mean(n.alarms)) %>% 
+  mutate(AboveMean = ifelse(n.alarms > day.mean, TRUE, FALSE )) %>%
+  group_by(Date.only, AboveMean) %>% 
+  summarise(nbeds.above = n()) 
+
+# shows the mean number of beds above/below the daily mean
+beds.a.b.dailymean <- aggregate(nbeds.above ~ AboveMean, data = PatientAlarms, FUN = function(x)
+  c(mean = mean(x), sd = sd(x)))
+
+beds.a.b.dailymean
+```
+*Table 9.1* shows that on average `r round(beds.a.b.dailymean$nbeds.above[2], 2)` beds issue more alarms than the daily mean. `r round(beds.a.b.dailymean$nbeds.above[1], 2)` issue less alarms than the daily mean.
+
+**Table 9.2: The mean percentage of all daily alarms issued by beds with more Alarms than the daily average**
+```{r mean perc alarms by beds above mean, message=FALSE, warning=FALSE}
+# what percentage of all alarms issue those beds above the daily mean
+PatientAlarms2 <- data_tbl %>%
+  filter(Situation == "generiert") %>% 
+  mutate(Date.only = as.Date(TrueTime)) %>%
+  group_by(Date.only, Bettname) %>% 
+  summarise(n.alarms = n()) %>% #count alarms per bed for each day
+  mutate(day.mean = mean(n.alarms)) %>% # calculate the mean of each day
+  mutate(total.alarms = sum(n.alarms)) %>% # get the total sum of all alarms for each day
+  mutate(AboveMean = ifelse(n.alarms > day.mean, TRUE, FALSE )) %>%
+  filter(AboveMean == TRUE) %>% # only retain beds that issued more alarms than the daily mean
+  group_by(Date.only, day.mean, total.alarms) %>% 
+  summarise(sum.alarms.beds.above = sum(n.alarms)) %>% # count the alarms issued by those beds above the mean
+  mutate(percent.of.total = sum.alarms.beds.above / total.alarms) # caluclate the percentage of the daily total alarms
+
+# shows the mean percentage of of all daily alarms issued by those beds with more alarms than the daily average
+summary(PatientAlarms2$percent.of.total)
+
+```
+*Table 9.2* shows that beds that issue more alarms than the daily mean account for `r round(summary(PatientAlarms2$percent.of.total)[4], 2)`% of all alarms of that day (SD `r round(sd(PatientAlarms2$percent.of.total), 2)`)
