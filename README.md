@@ -1,5 +1,9 @@
 # DIY Analysis of ICU Alarm Data
 
+
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4560041.svg)](https://doi.org/10.5281/zenodo.4560041)
+
 **This repository accompanies the following Publication:**
 
 > Poncette, A.S., Wunderlich, M.M., Spies, C., Heeren, P., Vorderwülbecke, G., Salgado, E., Kastrup, M., Feufel, M. and Balzer, F. (2020). *Patient Monitoring Alarms of an Intensive Care Unit: Observational Study with DIY Instructions* [Manuscript submitted for publication]. Department of Anesthesiology and Intensive Care Medicine, Charité – Universitätsmedizin Berlin, Corporate Member of Freie Universität Berlin, Humboldt-Universität zu Berlin, and Berlin Institute of Health, Berlin, Germany.
